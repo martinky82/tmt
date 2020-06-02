@@ -1,0 +1,4 @@
+summary: Use the certgen library to generate a certificate
+test: ./certificate.sh
+path: /
+require: 'library{url: "https://github.com/beakerlib-libraries/openssl", name: "certgen"}'

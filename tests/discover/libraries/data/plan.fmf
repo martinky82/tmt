@@ -1,0 +1,19 @@
+discover:
+    how: fmf
+provision:
+    how: virtual
+execute:
+    how: beakerlib.tmt
+
+/apache:
+    summary: "Run only the apache test"
+    discover+:
+        test: apache
+
+/certificate:
+    summary: "Run only the certificate test"
+    discover+:
+        test: certificate
+
+/both:
+    summary: "Run both tests (openssl fetched twice)"

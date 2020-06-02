@@ -1,9 +1,17 @@
 import os
+import re
 import fmf
 import tmt
 import shutil
 import click
 import tmt.steps.discover
+
+# Regular expressions for beakerlib libraries
+LIBRARY_REGEXP_RPM = re.compile(r'^library\(([^)]+)\)$')
+LIBRARY_REGEXP_FMF = re.compile(r'^library({[^}]+})$')
+
+# Default beakerlib libraries location
+DEFAULT_REPOSITORY = 'https://github.com/beakerlib-libraries'
 
 class DiscoverFmf(tmt.steps.discover.DiscoverPlugin):
     """
@@ -82,6 +90,72 @@ class DiscoverFmf(tmt.steps.discover.DiscoverPlugin):
             if value:
                 self.data[option] = value
 
+    def fetch_library(self, identifier):
+        """
+        Fetch beakerlib library for given identifier
+
+        Handle both basic 'library(component/lib)' syntax and full fmf
+        identifier. Clones library repository, checks for library
+        requires and fetches possible other dependent libraries.
+        Returns list of packages required by the library/libraries.
+        """
+        # Prepare url, ref and name
+        if isinstance(identifier, str):
+            component, name = identifier.split('/')
+            url = os.path.join(DEFAULT_REPOSITORY, component)
+            ref = 'master'
+        elif isinstance(identifier, dict):
+            url = identifier.get('url')
+            ref = identifier.get('ref', 'master')
+            name = identifier.get('name', 'main')
+            try:
+                component = re.search(r'/([^/]+?)(/|\.git)?$', url).group(1)
+            except:
+                raise tmt.utils.DiscoverError(
+                    f"Unable to parse component from '{url}'.")
+
+        # Fetch the repository
+        directory = os.path.join(self.workdir, 'libs', component)
+        if os.path.isdir(directory):
+            self.debug(f"Library '{identifier}' already fetched.")
+        else:
+            self.run(['git', 'clone', url, directory], shell=False)
+            self.run(['git', 'checkout', ref], shell=False, cwd=directory)
+
+        # Check library metadata for requires
+        tree = fmf.Tree(directory)
+        library = tree.find(f"/{name}")
+        requires = tmt.utils.listify(library.get('require', []))
+        return self.check_library_require(requires)
+
+    def check_library_require(self, requires):
+        """
+        Check test requires for libraries
+
+        Fetch all identified libraries, process their requires and
+        return only regular package requires extended with possible
+        additional requires aggregated from fetched libraries.
+        """
+        processed_requires = []
+        for require in requires:
+            require = require.strip()
+            rpm_require = LIBRARY_REGEXP_RPM.search(require)
+            fmf_require = LIBRARY_REGEXP_FMF.search(require)
+            # Basic library syntax: library(httpd/http)
+            if rpm_require:
+                identifier = rpm_require.group(1)
+            # Full fmf identifier: library{url: "...", name: "..."}
+            elif fmf_require:
+                identifier = tmt.utils.yaml_to_dict(fmf_require.group(1))
+            # No further processing for regular package requires
+            else:
+                processed_requires.append(require)
+                continue
+            # Fetch the library, add its requires
+            self.debug(f"Fetch beakerlib library '{identifier}'.")
+            processed_requires.extend(self.fetch_library(identifier))
+        return processed_requires
+
     def go(self):
         """ Discover available tests """
         super(DiscoverFmf, self).go()
@@ -152,9 +226,13 @@ class DiscoverFmf(tmt.steps.discover.DiscoverPlugin):
             return
         self._tests = tmt.Tree(tree_path).tests(filters=filters, names=names)
 
-        # Prefix test path with 'tests' and possible 'path' prefix
+        # Prefix tests and handle library requires
         for test in self._tests:
+            # Prefix test path with 'tests' and possible 'path' prefix
             test.path = os.path.join(prefix_path, test.path.lstrip('/'))
+            # Process the special library requires 'library(component/lib)'
+            if test.require:
+                test.require = self.check_library_require(test.require)
 
     def tests(self):
         """ Return all discovered tests """
