@@ -830,8 +830,11 @@ class Run(tmt.utils.Common):
     def finish(self):
         """ Check overall results, return appropriate exit code """
         # We get interesting results only if execute or prepare step is enabled
-        execute = self.plans[0].execute
-        report = self.plans[0].report
+        try:
+            execute = self.plans[0].execute
+            report = self.plans[0].report
+        except IndexError:
+            return
         interesting_results = execute.enabled or report.enabled
 
         # Gather all results and give an overall summary
