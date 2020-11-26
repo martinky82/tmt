@@ -6,7 +6,7 @@ import click
 
 class Prepare(tmt.steps.Step):
     """
-    Prepare the environment for testing
+    Prepare the environment for testing.
 
     Use the 'order' attribute to select in which order preparation
     should happen if there are multiple configs. Default order is 50.
@@ -56,10 +56,12 @@ class Prepare(tmt.steps.Step):
         if self.status() == 'done':
             self.info('status', 'done', 'green', shift=1)
             self.summary()
+            self.try_running_login()
             return
 
         # Required packages
-        requires = self.plan.discover.requires() + self.plan.execute.requires()
+        requires = list(set(
+            self.plan.discover.requires() + self.plan.execute.requires()))
         if requires:
             data = dict(
                 how='install',

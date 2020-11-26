@@ -7,8 +7,6 @@ import fmf
 import yaml
 import click
 import pprint
-import random
-import string
 import subprocess
 
 import tmt.steps
@@ -27,7 +25,10 @@ from tmt.utils import verdict
 from fmf.utils import listed
 from click import echo, style
 
-DEFAULT_TEST_DURATION = '5m'
+# Default test duration is 5m for individual tests discovered from L1
+# metadata and 1h for scripts defined directly in plans (L2 metadata).
+DEFAULT_TEST_DURATION_L1 = '5m'
+DEFAULT_TEST_DURATION_L2 = '1h'
 
 class Node(tmt.utils.Common):
     """
@@ -88,7 +89,7 @@ class Node(tmt.utils.Common):
 
         def run(command):
             """ Run command, return output """
-            result = subprocess.run(command.split(), capture_output=True)
+            result = subprocess.run(command.split(), stdout=subprocess.PIPE)
             return result.stdout.strip().decode("utf-8")
 
         fmf_id = {'name': self.name}
@@ -172,6 +173,7 @@ class Test(Node):
         # Test execution data
         'test',
         'path',
+        'framework',
         'manual',
         'require',
         'recommend',
@@ -216,12 +218,29 @@ class Test(Node):
         for key in self._keys:
             setattr(self, key, self.node.get(key))
 
-        # Path defaults to the node name
-        self._check('path', expected=str, default=self.name)
+        # Path defaults to the directory where metadata are stored or to
+        # the root '/' if fmf metadata were not stored on the filesystem
+        try:
+            directory = os.path.dirname(self.node.sources[-1])
+            relative_path = os.path.relpath(directory, self.node.root)
+            if relative_path == '.':
+                default_path = '/'
+            else:
+                default_path = os.path.join('/', relative_path)
+        except (AttributeError, IndexError):
+            default_path = '/'
+        self._check('path', expected=str, default=default_path)
 
         # Check that lists are lists or strings, listify if needed
         for key in ['component', 'contact', 'require', 'recommend', 'tag']:
             self._check(key, expected=(list, str), default=[], listify=True)
+
+        # FIXME Framework should default to 'shell' in the future. For
+        # backward-compatibility with the old execute methods we need to be
+        # able to detect if the test has explicitly set the framework.
+        self._check('framework', expected=str, default=None)
+        if self.framework == 'beakerlib':
+            self.require.append('beakerlib')
 
         # Check that environment is a dictionary
         self._check('environment', expected=dict, default={})
@@ -229,10 +248,16 @@ class Test(Node):
             (key, str(value)) for key, value in self.environment.items()])
 
         # Default duration, manual, enabled and result
-        self._check('duration', expected=str, default=DEFAULT_TEST_DURATION)
+        self._check('duration', expected=str, default=DEFAULT_TEST_DURATION_L1)
         self._check('manual', expected=bool, default=False)
         self._check('enabled', expected=bool, default=True)
         self._check('result', expected=str, default='respect')
+
+        # Store original metadata with applied defaults and including
+        # keys which are not defined in the L1 metadata specification
+        self._metadata = self.node.data.copy()
+        self._metadata.update(self.export(format_='dict'))
+        self._metadata['name'] = self.name
 
     @staticmethod
     def overview(tree):
@@ -256,7 +281,7 @@ class Test(Node):
         # Create metadata
         metadata_path = os.path.join(directory_path, 'main.fmf')
         tmt.utils.create_file(
-            path=metadata_path, content=tmt.templates.TEST_METADATA,
+            path=metadata_path, content=tmt.templates.TEST_METADATA[template],
             name='test metadata', force=force)
 
         # Create script
@@ -281,9 +306,12 @@ class Test(Node):
             self._sources()
             self._fmf_id()
 
-
     def lint(self):
-        """ Check test against the L1 metadata specification. """
+        """
+        Check test against the L1 metadata specification.
+
+        Return whether the test is valid.
+        """
         self.ls()
         echo(verdict(self.test is not None, 'test script must be defined'))
         echo(verdict(self.path is not None, 'directory path must be defined'))
@@ -291,6 +319,7 @@ class Test(Node):
             echo(verdict(2, 'summary is very useful for quick inspection'))
         elif len(self.summary) > 50:
             echo(verdict(2, 'summary should not exceed 50 characters'))
+        return self.test is not None and self.path is not None
 
     def export(
             self, format_='yaml', keys=None, create=False, general=False):
@@ -308,6 +337,7 @@ class Test(Node):
             data = dict()
             data['test'] = self.test
             data['path'] = self.path
+            data['framework'] = self.framework
             if self.duration is not None:
                 data['duration'] = self.duration
             if self.environment:
@@ -363,6 +393,9 @@ class Plan(Node):
             (key, str(value)) for key, value
             in node.get('environment', dict()).items()])
 
+        # Test execution context defined in the plan
+        self._plan_context = self.node.get('context', dict())
+
     @property
     def environment(self):
         """ Return combined environment from plan data and command line """
@@ -372,6 +405,12 @@ class Plan(Node):
             return combined
         else:
             return self._environment
+
+    def _fmf_context(self):
+        """ Return combined context from plan data and command line """
+        combined = self._plan_context.copy()
+        combined.update(self._context.obj.fmf_context)
+        return combined
 
     @staticmethod
     def edit_template(content):
@@ -423,7 +462,9 @@ class Plan(Node):
         # Prepare paths
         (directory, plan) = os.path.split(name)
         directory_path = os.path.join(tree.root, directory.lstrip('/'))
-        plan_path = os.path.join(directory_path, plan + '.fmf')
+        has_fmf_ext = os.path.splitext(plan)[1] == '.fmf'
+        plan_path = os.path.join(directory_path,
+                                plan + ('' if has_fmf_ext else '.fmf'))
 
         # Create directory & plan
         tmt.utils.create_directory(directory_path, 'plan directory')
@@ -466,11 +507,18 @@ class Plan(Node):
         if self.environment:
             echo(tmt.utils.format(
                 'environment', self.environment, key_color='blue'))
+        if self._fmf_context():
+            echo(tmt.utils.format(
+                'context', self._fmf_context(), key_color='blue'))
         if self.opt('verbose'):
             self._sources()
 
     def lint(self):
-        """ Check plan against the L2 metadata specification. """
+        """
+        Check plan against the L2 metadata specification.
+
+        Return whether the plan is valid.
+        """
         self.ls()
         execute = self.node.get('execute')
         echo(verdict(execute is not None, 'execute step must be defined'))
@@ -478,6 +526,7 @@ class Plan(Node):
             echo(verdict(2, 'summary is very useful for quick inspection'))
         elif len(self.summary) > 50:
             echo(verdict(2, 'summary should not exceed 50 characters'))
+        return execute is not None
 
     def go(self):
         """ Execute the plan """
@@ -490,6 +539,7 @@ class Plan(Node):
         # Additional debug info like plan environment
         self.debug('info', color='cyan', shift=0, level=3)
         self.debug('environment', self.environment, 'magenta', level=3)
+        self.debug('context', self._fmf_context(), 'magenta', level=3)
 
         # Wake up all steps
         self.debug('wake', color='cyan', shift=0, level=2)
@@ -568,7 +618,9 @@ class Story(Node):
         # Prepare paths
         (directory, story) = os.path.split(name)
         directory_path = os.path.join(tree.root, directory.lstrip('/'))
-        story_path = os.path.join(directory_path, story + '.fmf')
+        has_fmf_ext = os.path.splitext(story)[1] == '.fmf'
+        story_path = os.path.join(directory_path,
+                                  story + ('' if has_fmf_ext else '.fmf'))
 
         # Create directory & story
         tmt.utils.create_directory(directory_path, 'story directory')
@@ -661,10 +713,17 @@ class Story(Node):
 class Tree(tmt.utils.Common):
     """ Test Metadata Tree """
 
-    def __init__(self, path='.', tree=None):
+    def __init__(self, path='.', tree=None, context=None):
         """ Initialize tmt tree from directory path or given fmf tree """
         self._path = path
         self._tree = tree
+        self._custom_context = context
+
+    def _fmf_context(self):
+        """ Use custom fmf context if provided, default otherwise """
+        if self._custom_context is not None:
+            return self._custom_context
+        return super()._fmf_context()
 
     @property
     def tree(self):
@@ -678,6 +737,8 @@ class Tree(tmt.utils.Common):
                     f"Use 'tmt init' to get started.")
             except fmf.utils.FileError as error:
                 raise tmt.utils.GeneralError(f"Invalid yaml syntax: {error}")
+            # Adjust metadata for current fmf context
+            self._tree.adjust(fmf.context.Context(**self._fmf_context()))
         return self._tree
 
     @property
@@ -745,33 +806,39 @@ class Run(tmt.utils.Common):
         super().__init__(workdir=id_ or True, context=context)
         # Store workdir as the last run id
         self.config.last_run(self.workdir)
-        # Save the tree
-        try:
-            self.tree = tree if tree else tmt.Tree('.')
-            self.debug(f"Using tree '{self.tree.root}'.")
-        # Create a minimal default plan if no metadata
-        except tmt.utils.MetadataError:
-            plan = tmt.utils.yaml_to_dict("""
-                /plans/default:
-                    execute:
-                        how: shell
-                """)
-            self.tree = tmt.Tree(tree=fmf.Tree(plan))
-            self.debug(f"Using the default plan.")
+        self._save_tree(tree)
         self._plans = None
         self._environment = dict()
         self.remove = self.opt('remove')
+
+    def _save_tree(self, tree):
+        """ Save metadata tree, handle the default plan """
+        default_plan = tmt.utils.yaml_to_dict(tmt.templates.DEFAULT_PLAN)
+        try:
+            self.tree = tree if tree else tmt.Tree('.')
+            self.debug(f"Using tree '{self.tree.root}'.")
+            # Insert default plan if no plan detected
+            if not list(self.tree.tree.prune(keys=['execute'])):
+                self.tree.tree.update(default_plan)
+                self.debug(f"No plan found, adding the default plan.")
+        # Create an empty default plan if no fmf metadata found
+        except tmt.utils.MetadataError:
+            # The default discover method for this case is 'shell'
+            default_plan['/plans/default']['discover']['how'] = 'shell'
+            self.tree = tmt.Tree(tree=fmf.Tree(default_plan))
+            self.debug(f"No metadata found, using the default plan.")
 
     @property
     def environment(self):
         """ Return environment combined from wake up and command line """
         combined = self._environment.copy()
-        combined.update(tmt.utils.shell_to_dict(self.opt('environment')))
+        combined.update(tmt.utils.environment_to_dict(self.opt('environment')))
         return combined
 
     def save(self):
         """ Save list of selected plans and enabled steps """
         data = {
+            'root': self.tree.root,
             'plans': [plan.name for plan in self._plans],
             'steps': list(self._context.obj.steps),
             'environment': self.environment,
@@ -786,6 +853,11 @@ class Run(tmt.utils.Common):
         except tmt.utils.FileError:
             self.debug('Run data not found.')
             return
+
+        # If run id was given and root was not explicitly specified,
+        # create a new Tree from the root in run.yaml
+        if self._workdir and 'root' in data and not self.opt('root'):
+            self._save_tree(tmt.Tree(data['root']) if data['root'] else None)
 
         # Filter plans by name unless specified on the command line
         plan_options = ['names', 'filters', 'conditions']
@@ -813,18 +885,6 @@ class Run(tmt.utils.Common):
         """ Test plans for execution """
         if self._plans is None:
             self._plans = self.tree.plans(run=self)
-            # Use a default plan with fmf discover when no plan detected
-            if not self._plans:
-                plan = tmt.utils.yaml_to_dict("""
-                    /plans/default:
-                        discover:
-                            how: fmf
-                        execute:
-                            how: shell
-                    """)
-                self.tree.tree.update(plan)
-                self._plans = self.tree.plans(run=self)
-                self.debug(f"Using the default plan.")
         return self._plans
 
     def finish(self):
@@ -902,6 +962,8 @@ class Run(tmt.utils.Common):
         self.debug(f"Enabled steps: {fmf.utils.listed(enabled_steps)}")
 
         # Show summary, store run data
+        if not self.plans:
+            raise tmt.utils.GeneralError("No plans found.")
         self.verbose('Found {0}.'.format(listed(self.plans, 'plan')))
         self.save()
 
@@ -917,197 +979,6 @@ class Run(tmt.utils.Common):
         self.finish()
 
 
-class Guest(tmt.utils.Common):
-    """
-    Guest environment provisioned for test execution
-
-    The following keys are expected in the 'data' dictionary::
-
-        guest ...... hostname or ip address
-        user ....... user name to log in
-        key ........ private key
-        password ... password
-
-    These are by default imported into instance attributes.
-    """
-
-    # Supported keys (used for import/export to/from attributes)
-    _keys = ['guest', 'user', 'key', 'password']
-
-    def __init__(self, data, name=None, parent=None):
-        """ Initialize guest data """
-        super().__init__(parent, name)
-        self.load(data)
-
-    def _random_name(self):
-        """ Generate a random name """
-        return ''.join(random.choices(string.ascii_letters, k=16))
-
-    def _ssh_guest(self):
-        """ Return user@guest """
-        return f'{self.user}@{self.guest}'
-
-    def _ssh_options(self, join=False):
-        """ Return common ssh options (list or joined) """
-        options = [
-            '-oStrictHostKeyChecking=no',
-            '-oUserKnownHostsFile=/dev/null',
-            ]
-        if self.key:
-            options.extend(['-i', self.key])
-        return ' '.join(options) if join else options
-
-    def _ssh_command(self, join=False):
-        """ Prepare an ssh command line for execution (list or joined) """
-        command = ['sshpass', f'-p{self.password}'] if self.password else []
-        command += ['ssh'] + self._ssh_options()
-        return ' '.join(command) if join else command
-
-    def load(self, data):
-        """ Load guest data for easy access """
-        for key in self._keys:
-            setattr(self, key, data.get(key))
-
-    def save(self):
-        """ Save guest data for future wake up """
-        data = dict()
-        for key in self._keys:
-            value = getattr(self, key)
-            if value is not None:
-                data[key] = value
-        return data
-
-    def wake(self):
-        """ Wake up the guest """
-        self.debug(f"Doing nothing to wake up guest '{self.guest}'.")
-
-    def start(self):
-        """ Start the guest """
-        self.debug(f"Doing nothing to start guest '{self.guest}'.")
-
-    def details(self):
-        """ Show guest details such as distro and kernel """
-        # Skip distro & kernel check in dry mode
-        if self.opt('dry'):
-            return
-        # Distro
-        try:
-            distro = self.execute(
-                'cat /etc/redhat-release', dry=True)[0].strip()
-        except tmt.utils.RunError:
-            try:
-                distro = self.execute('cat /etc/lsb-release')[0].strip()
-                distro = re.search('DESCRIPTION="(.*)"', distro).group(1)
-            except (tmt.utils.RunError, AttributeError):
-                distro = None
-        if distro:
-            self.info('distro', distro, 'green')
-        # Kernel
-        kernel = self.execute('uname -r', dry=True)[0].strip()
-        self.verbose('kernel', kernel, 'green')
-
-    def _ansible_verbosity(self):
-        """ Prepare verbose level based on the --debug option count """
-        if self.opt('debug') < 3:
-            return ''
-        else:
-            return ' -' + (self.opt('debug') - 2) * 'v'
-
-    def _ansible_summary(self, output):
-        """ Check the output for ansible result summary numbers """
-        if not output:
-            return
-        keys = 'ok changed unreachable failed skipped rescued ignored'.split()
-        for key in keys:
-            matched = re.search(rf'^.*\s:\s.*{key}=(\d+).*$', output, re.M)
-            if matched and int(matched.group(1)) > 0:
-                tasks = fmf.utils.listed(matched.group(1), 'task')
-                self.verbose(key, tasks, 'green')
-
-    def _ansible_playbook_path(self, playbook):
-        """ Prepare full ansible playbook path """
-        # Playbook paths should be relative to the metadata tree root
-        self.debug(f"Applying playbook '{playbook}' on guest '{self.guest}'.")
-        playbook = os.path.join(self.parent.plan.run.tree.root, playbook)
-        self.debug(f"Playbook full path: '{playbook}'", level=2)
-        return playbook
-
-    def _export_environment(self, execute_environment=None):
-        """ Prepare shell export of environment variables """
-        # Prepare environment variables so they can be correctly passed
-        # to ssh's shell. Create a copy to prevent modifying source.
-        environment = dict()
-        environment.update(execute_environment or dict())
-        # Plan environment and variables provided on the command line
-        # override environment provided to execute().
-        environment.update(self.parent.plan.environment)
-        # Prepend with export and run as a separate command.
-        if not environment:
-            return ''
-        return 'export {}; '.format(
-            ' '.join(tmt.utils.shell_variables(environment)))
-
-    def ansible(self, playbook):
-        """ Prepare guest using ansible playbook """
-        playbook = self._ansible_playbook_path(playbook)
-        stdout, stderr = self.run(
-            f'stty cols {tmt.utils.OUTPUT_WIDTH}; ansible-playbook '
-            f'--ssh-common-args="{self._ssh_options(join=True)}" '
-            f'-e ansible_python_interpreter=auto'
-            f'{self._ansible_verbosity()} -i {self._ssh_guest()}, {playbook}')
-        self._ansible_summary(stdout)
-
-    def execute(self, command, **kwargs):
-        """
-        Execute command on the guest
-
-        command ....... string or list of command arguments
-        environment ... dictionary with environment variables
-        """
-
-        # Prepare the export of environment variables
-        environment = self._export_environment(kwargs.get('env', dict()))
-
-        # Change to given directory on guest if cwd provided
-        directory = kwargs.get('cwd', '')
-        if directory:
-            directory = f"cd '{directory}'; "
-
-        # Run in interactive mode if requested
-        interactive = ['-t'] if kwargs.get('interactive') else []
-
-        # Prepare command and run it
-        if isinstance(command, (list, tuple)):
-            command = ' '.join(command)
-        self.debug(f"Execute command '{command}' on guest '{self.guest}'.")
-        command = (
-            self._ssh_command() + interactive + [self._ssh_guest()] +
-            [f'{environment}{directory}{command}'])
-        return self.run(command, shell=False, **kwargs)
-
-    def push(self):
-        """ Push workdir to guest """
-        self.debug(f"Push workdir to guest '{self.guest}'.")
-        self.run(
-            f'rsync -Rrze "{self._ssh_command(join=True)}" --delete '
-            f'{self.parent.plan.workdir} {self._ssh_guest()}:/')
-
-    def pull(self):
-        """ Pull workdir from guest """
-        self.debug(f"Pull workdir from guest '{self.guest}'.")
-        self.run(
-            f'rsync -Rrze "{self._ssh_command(join=True)}" '
-            f'{self._ssh_guest()}:{self.parent.plan.workdir} /')
-
-    def stop(self):
-        """ Stop the guest """
-        self.debug(f"Doing nothing to stop guest '{self.guest}'.")
-
-    def remove(self):
-        """ Remove the guest (disk cleanup) """
-        self.debug(f"Doing nothing to remove guest '{self.guest}'.")
-
-
 class Result(object):
     """
     Test result
@@ -1116,6 +987,7 @@ class Result(object):
 
         result ........... test execution result
         log .............. one or more log files
+        note ............. additional result details
 
     Required parameter 'name' should contain a unique test name.
     """
@@ -1132,10 +1004,11 @@ class Result(object):
         """
         Initialize test result data """
 
-        # Save the test name
+        # Save the test name and optional note
         if not name or not isinstance(name, str):
             raise tmt.utils.SpecificationError(f"Invalid test name '{name}'.")
         self.name = name
+        self.note = data.get('note')
 
         # Check for valid results
         try:
@@ -1183,11 +1056,15 @@ class Result(object):
         return fmf.utils.listed(comments or ['no results found'])
 
     def show(self):
-        """ Return a nicely color result with test name """
+        """ Return a nicely colored result with test name (and note) """
         result = 'errr' if self.result == 'error' else self.result
         colored = style(result, fg=self._results[self.result])
-        return f"{colored} {self.name}"
+        note = f" ({self.note})" if self.note else ''
+        return f"{colored} {self.name}{note}"
 
     def export(self):
         """ Save result data for future wake-up """
-        return dict(result=self.result, log=self.log)
+        data = dict(result=self.result, log=self.log)
+        if self.note:
+            data['note'] = self.note
+        return data

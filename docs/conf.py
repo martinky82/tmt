@@ -260,11 +260,13 @@ areas = {
     '/stories/cli': 'Command Line',
     '/stories/api': 'API',
     '/stories/install': 'Installation',
+    '/stories/coverage': 'Coverage',
     '/spec/core': 'Core',
     '/spec/tests': 'Tests',
     '/spec/plans': 'Plans',
     '/spec/steps': 'Steps',
     '/spec/stories': 'Stories',
+    '/spec/context': 'Context',
     }
 
 os.makedirs('stories', exist_ok=True)

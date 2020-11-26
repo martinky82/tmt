@@ -159,36 +159,18 @@ class Step(tmt.utils.Common):
                 if classes is None or isinstance(plugin, classes)],
             key=lambda plugin: plugin.order)
 
+    def try_running_login(self):
+        """ Run all loaded Login plugin instances of the step """
+        for plugin in self.plugins():
+            if isinstance(plugin, Login):
+                plugin.go()
+
     def go(self):
         """ Execute the test step """
         # Show step header and how
         self.info(self.name, color='blue')
         # Show workdir in verbose mode
         self.debug('workdir', self.workdir, 'magenta')
-
-    def show(self, keys=[]):
-        """ Show step details """
-        # FIXME Remove when handled by dynamic plugins
-        for step in self.data:
-            # Show empty steps only in verbose mode
-            if (set(step.keys()) == set(['how', 'name'])
-                    and not self.opt('verbose')):
-                continue
-            # Step name (and optional header)
-            echo(tmt.utils.format(
-                self, step.get('summary') or '', key_color='blue'))
-            # Show all or requested step attributes
-            for key in keys or step:
-                # Skip showing the default name
-                if key == 'name' and step['name'] == tmt.utils.DEFAULT_NAME:
-                    continue
-                # Skip showing summary again
-                if key == 'summary':
-                    continue
-                try:
-                    echo(tmt.utils.format(key, step[key]))
-                except KeyError:
-                    pass
 
 
 class Method(object):
@@ -237,6 +219,10 @@ class PluginIndex(type):
 class Plugin(tmt.utils.Common, metaclass=PluginIndex):
     """ Common parent of all step plugins """
 
+    # Default implementation for all steps is shell
+    # except for provision (virtual) and report (display)
+    how = 'shell'
+
     def __init__(self, step, data):
         """ Store plugin name, data and parent step """
 
@@ -266,7 +252,7 @@ class Plugin(tmt.utils.Common, metaclass=PluginIndex):
         """ Prepare click command for all supported methods """
         # Create one command for each supported method
         commands = {}
-        method_overview = 'Supported methods:\n\n\b'
+        method_overview = f'Supported methods ({cls.how} by default):\n\n\b'
         for method in cls.methods():
             method_overview += f'\n{method.describe()}'
             command = cls.base_command(usage=method.usage())
@@ -304,9 +290,27 @@ class Plugin(tmt.utils.Common, metaclass=PluginIndex):
                     f"for the '{data['how']}' method.", level=2)
                 return method.class_(step, data)
 
+        # Give some hints when provision plugins are not installed
+        if step.name == 'provision':
+            if data['how'] == 'virtual':
+                step.info(
+                    'hint', "Install 'tmt-provision-virtual' "
+                    "to run tests in a virtual machine.", color='blue')
+            if data['how'] == 'container':
+                step.info(
+                    'hint', "Install 'tmt-provision-container' "
+                    "to run tests in a container.", color='blue')
+            step.info(
+                'hint', "Use the 'local' method to execute tests "
+                "directly on your localhost.", color='blue')
+            step.info(
+                'hint', "See 'tmt run provision --help' for all "
+                "available provision options.", color='blue')
+
         # Report invalid method
         raise tmt.utils.SpecificationError(
-            f"Unsupported method '{data['how']}' in '{step.plan.name}'.")
+            f"Unsupported {step.name} method '{data['how']}' "
+            f"in the '{step.plan.name}' plan.")
 
     def default(self, option, default=None):
         """ Return default data for given option """
@@ -328,18 +332,20 @@ class Plugin(tmt.utils.Common, metaclass=PluginIndex):
 
     def show(self, keys=None):
         """ Show plugin details for given or all available keys """
-        # Show empty config only in verbose mode
+        # Show empty config with default method only in verbose mode
         if (set(self.data.keys()) == set(['how', 'name'])
-                and not self.opt('verbose')):
+                and not self.opt('verbose')
+                and self.data['how'] == self.how):
             return
         # Step name (and optional summary)
         echo(tmt.utils.format(
             self.step, self.get('summary', ''),
             key_color='blue', value_color='blue'))
         # Show all or requested step attributes
+        base_keys = ['name', 'how']
         if keys is None:
-            keys = list(self.data.keys())
-        for key in ['name', 'how'] + keys:
+            keys = [key for key in self.data.keys() if key not in base_keys]
+        for key in base_keys + keys:
             # Skip showing the default name
             if key == 'name' and self.name == tmt.utils.DEFAULT_NAME:
                 continue

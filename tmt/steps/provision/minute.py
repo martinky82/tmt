@@ -10,6 +10,7 @@ import time
 import urllib3.exceptions
 
 import tmt
+from tmt.utils import retry_session
 
 
 DEFAULT_USER = 'root'
@@ -38,7 +39,12 @@ def run_openstack(url, cmd, cached_list=False):
     # is unfortunately necessary here for the plugin to work.
     requests.packages.urllib3.disable_warnings(
         category=urllib3.exceptions.InsecureRequestWarning)
-    response = requests.post(url, verify=False, data=data)
+    try:
+        response = retry_session().post(url, verify=False, data=data)
+    except requests.exceptions.ConnectionError:
+        raise tmt.utils.ProvisionError(
+            "The minute API is currently unavailable. "
+            "Please check your connection or try again later.")
     if response.ok:
         # The output is in the form of: <stdout>\n<exit>\n.
         split = response.text.rsplit('\n', 2)
@@ -106,6 +112,7 @@ class ProvisionMinute(tmt.steps.provision.ProvisionPlugin):
 
         # Read API URL from 1minutetip script
         try:
+            self.debug(f"Get the API URL from '{SCRIPT_PATH}'.")
             script_content = self.read(SCRIPT_PATH)
             match = re.search(API_URL_RE, script_content)
             if not match:
@@ -168,9 +175,14 @@ class GuestMinute(tmt.Guest):
         return data
 
     def _guess_net_id(self):
+        self.debug("Check the network IP availability.")
         _, networks = run_openstack(
             self.api_url, 'ip availability list -f json')
-        networks = json.loads(networks)
+        try:
+            networks = json.loads(networks)
+        except json.decoder.JSONDecodeError:
+            raise tmt.utils.ProvisionError(
+                "Failed to decode network data from the minute API.")
         networks = [
             network for network in networks
             if re.match(NETWORK_NAME_RE, network['Network Name'])]
@@ -183,7 +195,7 @@ class GuestMinute(tmt.Guest):
         best = max(
             networks, key=lambda x: x.get('Total IPs') - x.get('Used IPs'))
         self.debug(
-            f'Using the following network:\n{json.dumps(best, indent=2)}',
+            f'Use the following network:\n{json.dumps(best, indent=2)}',
             level=2, shift=0)
         return best['Network ID'], best['Network Name']
 
@@ -197,6 +209,7 @@ class GuestMinute(tmt.Guest):
         if not network_id:
             return False
 
+        self.debug(f"Try to boot a new openstack machine.")
         error, net_info = run_openstack(
             self.api_url,
             f'server create --wait '
@@ -217,6 +230,7 @@ class GuestMinute(tmt.Guest):
         self.guest = match.group('ip')
 
         # Wait for ssh connection
+        self.debug("Wait for an ssh connection to the machine.")
         for i in range(1, DEFAULT_CONNECT_TIMEOUT):
             try:
                 self.execute('whoami')
@@ -226,26 +240,32 @@ class GuestMinute(tmt.Guest):
             time.sleep(1)
 
         if i == DEFAULT_CONNECT_TIMEOUT:
+            self.debug("Failed to boot the machine, removing it.")
             self.delete()
             return False
         return True
 
     def _setup_machine(self):
-        response = requests.get(
+        self.debug("Try to get a prereserved minute machine.")
+        response = retry_session().get(
             f'{self.api_url}?image_name={self.mt_image}'
             f'&user={self.username}&osver=rhos10', verify=False)
         if not response.ok:
             return
+        self.debug(f"Prereserved machine result: {response.text}")
         # No prereserved machine, boot a new one
         if 'prereserve' not in response.text:
             return self._boot_machine()
         # Rename the prereserved machine
         old_name, self.guest = response.text.split()
+        self.debug(
+            f"Rename the machine from '{old_name}' to '{self.instance_name}'.")
         _, rename_out = run_openstack(
             self.api_url, f'server set --name {self.instance_name} {old_name}')
         if rename_out is None or 'ERROR' in rename_out:
             return False
         # Machine renamed, set properties
+        self.debug("Change properties of the prereserved machine.")
         run_openstack(
             self.api_url,
             f'server set --property local_user={self.username} '
@@ -278,15 +298,19 @@ class GuestMinute(tmt.Guest):
         """
         mt_image = image
         image_lower = image.lower().strip()
+        self.debug("Check for available 1MT images.")
         _, images = run_openstack(
             self.api_url, 'image list -f value -c Name', True)
+        _, released = run_openstack(
+            self.api_url, 'image list -f value -c Name --tag released', False)
         images = images.splitlines()
+        released = released.splitlines()
 
         # Use the latest Fedora image
         if image_lower == 'fedora':
             fedora_re = re.compile(r'1MT-Fedora-(?P<ver>\d+)')
             fedora_images = [
-                image for image in images if fedora_re.match(image)]
+                image for image in released if fedora_re.match(image)]
             mt_image = sorted(fedora_images)[-1]
 
         # Fedora shortened names
@@ -295,18 +319,23 @@ class GuestMinute(tmt.Guest):
             mt_image = f'1MT-Fedora-{fedora_match.group("ver")}'
 
         # RHEL shortened names
-        rhel_match = re.match(r'^rhel-?(?P<ver>\d+)$', image_lower)
+        rhel_match = re.match(r'^rhel-?(?P<ver>\d+(?:\.\d)*)$', image_lower)
         if rhel_match:
             rhel_re = re.compile(r'1MT-RHEL-*{}'.format(
                 re.escape(rhel_match.group('ver'))))
-            # Remove obsolete and invalid images
-            invalid_re = re.compile(r'(new|obsolete|invalid|fips)$')
             rhel_images = [
-                image for image in images
-                if rhel_re.match(image) and not invalid_re.search(image)]
+                image for image in released if rhel_re.match(image)]
+
+            # No such released image, try choosing from the whole set
+            if not rhel_images:
+                # Remove obsolete and invalid images
+                invalid_re = re.compile(r'(new|obsolete|invalid|fips)$')
+                rhel_images = [
+                    image for image in images
+                    if rhel_re.match(image) and not invalid_re.search(image)]
 
             # Use the last image (newest RHEL)
-            mt_image = rhel_images[-1]
+            mt_image = rhel_images[-1] if rhel_images else None
 
         # CentOS shortened names
         centos_match = re.match(r'^centos-?(?P<ver>\d+)$', image_lower)
@@ -314,7 +343,7 @@ class GuestMinute(tmt.Guest):
             mt_image = f'1MT-CentOS-{centos_match.group("ver")}'
 
         # Check if the image is valid
-        if not mt_image in images:
+        if mt_image not in images:
             raise tmt.utils.ProvisionError(
                 f"Image '{image}' is not a valid 1minutetip image.")
         return mt_image
@@ -337,6 +366,7 @@ class GuestMinute(tmt.Guest):
             "All attempts to provision a machine with 1minutetip failed.")
 
     def delete(self):
+        self.debug(f"Remove the minute instance '{self.instance_name}'.")
         run_openstack(self.api_url, f'server delete {self.instance_name}')
 
     def remove(self):

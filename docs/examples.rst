@@ -152,7 +152,7 @@ condition::
     $ tmt tests ls --filter 'tier: 0'
     /tests/docs
 
-    $ tmt tests ls --condition 'tier > 0'
+    $ tmt tests ls --condition 'int(tier) > 0'
     /tests/ls
 
 In order to select tests under the current working directory use
@@ -198,18 +198,14 @@ Specify templates non-interactively with ``-t`` or ``--template``::
 Use ``-f`` or ``--force`` option to overwrite existing files.
 
 
-Convert Tests
+Import Tests
 ------------------------------------------------------------------
 
-Use ``tmt tests convert`` to gather old metadata stored in
+Use ``tmt tests import`` to gather old metadata stored in
 different sources and convert them into the new ``fmf`` format.
 By default ``Makefile`` and ``PURPOSE`` files in the current
 directory are inspected and the ``Nitrate`` test case management
-system is contacted to gather all related metadata::
-
-    makefile ..... summary, component, duration
-    purpose ...... description
-    nitrate ...... environment, relevancy
+system is contacted to gather all related metadata.
 
 In order to fetch data from Nitrate you need to have ``nitrate``
 module installed. For each test case found in Nitrate separate fmf
@@ -219,23 +215,39 @@ found in all test cases are stored in ``main.fmf``. You can use
 and ``--no-purpose`` switches to disable the other two metadata
 sources.
 
+Manual test cases can be imported from Nitrate using the
+``--manual`` option. Provide either ``--case ID`` or ``--plan ID``
+with the Nitrate test case/plan identifier to select which test
+case should be imported or which test plan should be checked for
+manual test cases. Directory ``Manual`` will be created in the fmf
+root directory and manual test cases will be imported there.
+
 Example output of metadata conversion::
 
-    $ tmt test convert
+    $ tmt test import
     Checking the '/home/psss/git/tmt/examples/convert' directory.
     Makefile found in '/home/psss/git/tmt/examples/convert/Makefile'.
-    test: /tmt/smoke
-    description: Simple smoke test
+    task: /tmt/smoke
+    summary: Simple smoke test
+    test: ./runtest.sh
+    contact: Petr Splichal <psplicha@redhat.com>
     component: tmt
     duration: 5m
+    require: fmf
+    recommend: tmt
     Purpose found in '/home/psss/git/tmt/examples/convert/PURPOSE'.
     description:
     Just run 'tmt --help' to make sure the binary is sane.
     This is really that simple. Nothing more here. Really.
     Nitrate test case found 'TC#0603489'.
+    extra-summary: tmt convert test
     contact: Petr Šplíchal <psplicha@redhat.com>
     environment:
     {'TEXT': 'Text with spaces', 'X': '1', 'Y': '2', 'Z': '3'}
+    tag: ['NoRHEL4', 'NoRHEL5', 'Tier3']
+    tier: 3
+    component: tmt
+    enabled: True
     relevancy:
     distro = rhel-4, rhel-5: False
     distro = rhel-6: False
@@ -243,21 +255,68 @@ Example output of metadata conversion::
 
 And here's the resulting ``main.fmf`` file::
 
-    component: tmt
-    contact: Petr Šplíchal <psplicha@redhat.com>
+    summary: Simple smoke test
     description: |
         Just run 'tmt --help' to make sure the binary is sane.
         This is really that simple. Nothing more here. Really.
-    duration: 5m
+    contact: Petr Šplíchal <psplicha@redhat.com>
+    component:
+    - tmt
+    test: ./runtest.sh
+    require:
+    - fmf
+    recommend:
+    - tmt
     environment:
         TEXT: Text with spaces
         X: '1'
         Y: '2'
         Z: '3'
+    duration: 5m
+    enabled: true
+    tag:
+    - NoRHEL4
+    - NoRHEL5
+    - Tier3
+    tier: '3'
     relevancy: |
         distro = rhel-4, rhel-5: False
         distro = rhel-6: False
-    summary: Simple smoke test
+    extra-summary: tmt convert test
+    extra-task: /tmt/smoke
+    extra-nitrate: TC#0603489
+
+
+Export Tests
+------------------------------------------------------------------
+
+Use ``tmt tests export`` command to export test metadata into
+different formats and tools. By default all available tests are
+exported, specify regular expression matching test name to export
+only selected tests or use ``.`` to export tests under the current
+directory::
+
+    $ tmt tests export --nitrate .
+    Test case 'TC#0603489' found.
+    summary: tmt convert test
+    script: /tmt/smoke
+    components: tmt
+    tags: NoRHEL4 Tier3 NoRHEL5 fmf-export
+    default tester: psplicha@redhat.com
+    estimated time: 5m
+    status: CONFIRMED
+    arguments: TEXT='Text with spaces' X=1 Y=2 Z=3
+    Structured Field:
+    relevancy: distro = rhel-4, rhel-5: False
+    distro = rhel-6: False
+    description: Simple smoke test
+    purpose-file: Just run 'tmt --help' to make sure the binary is sane.
+    This is really that simple. Nothing more here. Really.
+    fmf id:
+    name: /
+    path: /examples/convert
+    url: https://github.com/psss/tmt.git
+    Test case 'TC#0603489' successfully exported to nitrate.
 
 
 Test Libraries
@@ -389,6 +448,58 @@ documentation for a detailed description of the hierarchy,
 inheritance and merging attributes.
 
 .. _fmf features: https://fmf.readthedocs.io/en/latest/features.html
+
+
+Multiple Configs
+------------------------------------------------------------------
+
+Step can contain multiple configurations. In this case provide
+each config with a unique name. Applying ansible playbook and
+executing custom script in a single :ref:`/spec/steps/prepare`
+step could look like this::
+
+    prepare:
+      - name: packages
+        how: ansible
+        playbooks: plans/packages.yml
+      - name: services
+        how: shell
+        script: systemctl start service
+
+Another common use case which can be easily covered by multiple
+configs can be fetching tests from multiple repositories during
+the :ref:`/spec/steps/discover` step::
+
+    discover:
+      - name: upstream
+        how: fmf
+        repository: https://github.com/psss/tmt
+      - name: fedora
+        how: fmf
+        repository: https://src.fedoraproject.org/rpms/tmt/
+
+
+Extend Steps
+------------------------------------------------------------------
+
+When defining multiple configurations for a step it is also
+possible to make use of fmf inheritance. For example the common
+preparation config can be defined up in the hierarchy::
+
+    prepare:
+      - name: tmt
+        how: install
+        package: tmt
+
+Extending the prepare config in a child plan to install additional
+package then could be done in the following way::
+
+    prepare+:
+      - name: pytest
+        how: install
+        package:
+            - python3-pytest
+            - python3-mock
 
 
 Stories
@@ -742,7 +853,46 @@ exactly is happening during test execution. This also allows to
 inspect particular place of the code by inserting a ``bash`` in
 the shell code or ``import pdb; pdb.set_trace()`` for python::
 
-    tmt run --all execute --how beakerlib.tmt --interactive
+    tmt run --all execute --how tmt --interactive
+
+
+Aliases
+------------------------------------------------------------------
+
+It might be useful to set up a set of shell aliases for the tmt
+command lines which you often use. For a quick reservation of
+a machine or a container for quick experimenting::
+
+    alias reserve='tmt run login --step execute execute finish provision --how container --image fedora'
+
+Reserving a testing box then can be as short as this::
+
+    reserve
+    reserve -h virtual
+    reserve -i fedora:32
+    reserve --how virtual
+    reserve --image fedora:32
+
+For interactive debugging of tests the following three aliases can
+come in handy::
+
+    alias start='tmt run --verbose --until report execute --how tmt --interactive test --name . provision --how virtual --image fedora'
+    alias retest='tmt run --last test --name . discover -f execute -f --how tmt --interactive'
+    alias stop='tmt run --last report --verbose finish'
+
+The test debugging session then can look like this::
+
+    start
+    retest
+    retest
+    retest login
+    ...
+    stop
+
+First you ``start`` the session in order to provision a testing
+environment, then you ``retest`` your test code changes as many
+times as you need to finalize the test implementation, and finally
+``stop`` is used to clean up the testing environment.
 
 
 Guest Login
@@ -775,6 +925,16 @@ step to remove provisioned guest::
 
     tmt run provision login
     tmt run --last finish
+
+Clean up the box right after your are done with experimenting by
+combining the above-mentioned commands on a single line::
+
+    tmt run provision login finish
+
+Have you heard already that using command abbreviation is possible
+as well? It might save you some typing::
+
+    tmt run pro log fin
 
 See the :ref:`/stories/cli/run/login` user stories for more
 details and examples.

@@ -1,10 +1,11 @@
 Name: tmt
-Version: 0.18
+Version: 1.1
 Release: 1%{?dist}
 
 Summary: Test Management Tool
 License: MIT
 BuildArch: noarch
+%{?kernel_arches:ExclusiveArch: %{kernel_arches} noarch}
 
 URL: https://github.com/psss/tmt
 Source0: https://github.com/psss/tmt/releases/download/%{version}/tmt-%{version}.tar.gz
@@ -75,13 +76,19 @@ Requires: ansible openssh-clients rsync
 %description provision-virtual
 Dependencies required to run tests in a local virtual machine.
 
+%package test-convert
+Summary: Test import and export dependencies
+Requires: make python3-nitrate python3-html2text
+
+%description test-convert
+Additional dependencies needed for test metadata import and export.
+
 %package all
 Summary: Extra dependencies for the Test Management Tool
 Requires: tmt >= %{version}
 Requires: tmt-provision-container >= %{version}
 Requires: tmt-provision-virtual >= %{version}
-Requires: python3-nitrate make
-Recommends: vagrant
+Requires: tmt-test-convert >= %{version}
 
 %description all
 All extra dependencies of the Test Management Tool. Install this
@@ -118,7 +125,7 @@ install -pm 644 bin/complete %{buildroot}/etc/bash_completion.d/tmt
 export LANG=en_US.utf-8
 %endif
 
-%{__python3} -m pytest -vv
+%{__python3} -m pytest -vv -m 'not web'
 
 
 %{!?_licensedir:%global license %%doc}
@@ -143,11 +150,127 @@ export LANG=en_US.utf-8
 %files provision-virtual
 %{python3_sitelib}/%{name}/steps/provision/{,__pycache__/}testcloud.*
 
+%files test-convert
+%license LICENSE
+
 %files all
 %license LICENSE
 
 
 %changelog
+* Thu Oct 22 2020 Petr Šplíchal <psplicha@redhat.com> - 1.1-1
+- Convert adds extra-summary as well
+- Simplify test directory copy with enabled symlinks
+- Select latest minute image only from released images
+- Allow specifying exact RHEL version using a short name
+- Preserve symlinks during discover, pull and push
+- Always run Login plugin even if step is done
+- Suggest some useful aliases for common use cases
+- Correct type of Tier attribute in examples
+- Define basic hardware environment specification
+- Import manual data for automated tests
+- Tag tests which can be run under container/virtual
+- Give hints to install provision plugins [fix #405]
+- Handle nicely missing library metadata [fix #397]
+- Update the test data directory name in the spec
+- Extend duration for tests using virtualization
+- Use a better name for the test data path method
+- Provide aggregated test metadata for execution
+- Send warnings to stderr, introduce a fail() method
+
+* Wed Oct 07 2020 Petr Šplíchal <psplicha@redhat.com> - 1.0-1
+- Correctly handle framework for new plans and tests
+- Move runtest.sh adjustments into a single function
+- Add the executable permission to runtest.sh
+- Less strict removing sourcing of rhts-environment
+- Use metadata directory as the default for path
+- Implement the new L1 attribute 'framework'
+- Explicitly enable copr_build for pull requests
+- Handle missing library in existing repository
+- Update the overall tmt description and examples
+- Enable builds from master in the main copr repo
+- Merge packit config for copr builds from master
+- Use packit repository for copr builds from master
+- Gracefully handle invalid test output
+- Build in COPR for master via packit
+- Add hint about caching the dnf package metadata
+- Add two hints about easy login for experimenting
+- Merge debug messages for the minute plugin [#361]
+- Adjust the minute provision debug messages wording
+- Use the internal tmt executor by default
+- Add more debug messages to minute provision
+- Remove the remaining 'tmt test convert' references
+- Prevent shebang mangling for detached executor
+- Merge the minute and install plugin docs [#345]
+- Adjust the minute and install plugin documentation
+- Merge the manual test import documentation [#347]
+- Adjust the manual test documentation wording
+- Merge rhts-environment source line removal [#344]
+- Adjust rhts-environment source line removal
+- Add missing extra-* keys to the test import
+- Add docs for manual case import
+- Disable authentication when fetching libraries
+- Document the install prepare method
+- Document the minute provision method
+- Remove sourcing of rhts-environment in runtest.sh
+- Add minute to supported provision methods of prepare
+
+* Mon Sep 07 2020 Petr Šplíchal <psplicha@redhat.com> - 0.21-1
+- Adjust manual test case import from nitrate [#319]
+- Move the test convert deps into a separate package
+- Support importing manual test cases from Nitrate
+- Merge the non-zero exit codes for linting errors
+- Fix several test export issues [fix #337]
+- Adjust distro checks, remove the dry parameter
+- Generalized Guest.details() [fix #310]
+- Adjust the test coverage for tmt plan/test lint
+- Update documentation with virtualization tips
+- Make sure the duration timer is always canceled
+- Merge the new retry_session functionality [#328]
+- Exit with non-zero code if linting fails
+- Merge fix for the double fmf extension [#327]
+- Prevent koji from trying to build packages on i686
+- Retry requests in case of network failure
+- Avoid double fmf extension when creating plans and stories
+- Improve the maximum test duration handling
+- Remove vagrant from tmt-all recommended packages
+- Detect beakerlib libraries from recommend as well
+- Simplify packit custom create archive command
+- Make the httpd test example a bit more interesting
+- Append dots to fix tmt run --help message summary
+- Document multiple configs and extending steps
+
+* Tue Jul 28 2020 Petr Šplíchal <psplicha@redhat.com> - 0.20-1
+- Move libraries handling into a separate module
+- Adjust loading variables from YAML files [#316]
+- Support environment variables from YAML files
+- Give a nice error for expired kerberos [fix #57]
+- Merge Guest relocation and documentation [#307]
+- Describe essential Guest methods in more detail
+- Update test import story and documentation
+- Merge extra-task as summary in test export [#304]
+- Move default plan handling into a single method
+- Move the Guest class from base to steps.provision
+- Save root in run.yaml
+- Document L1 metadata defined in the discover step
+- Improve Makefile editing during test import
+- Use extra-task as summary in test export
+- Mention default methods in the step help message
+- Handle invalid url when library provided as fmf id
+- Allow library git clone to fail
+
+* Fri Jun 12 2020 Petr Šplíchal <psplicha@redhat.com> - 0.19-1
+- Make the discover step a little bit more secure
+- Improve basic and verbose output of tmt plan show
+- Improve default plan handling and more [fix #287]
+- Adjust the compose check retry in testcloud
+- Retry Fedora compose check in testcloud [fix #275]
+- Update development section and library example
+- Support fetching beakerlib libraries in discover
+- Add nitrate to the setup.py extra requires
+- Add a workflow-tomorrow integration test example
+- Add 'duration' into the test results specification
+
 * Mon Jun 01 2020 Petr Šplíchal <psplicha@redhat.com> - 0.18-1
 - Add virtual plans for supported provision methods
 - Implement description in 'tmt plan show' as well

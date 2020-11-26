@@ -4,6 +4,7 @@
 from click import style, echo, wrap_text
 
 from collections import OrderedDict
+from threading import Timer
 import unicodedata
 import subprocess
 import fmf.utils
@@ -15,6 +16,9 @@ import yaml
 import re
 import io
 import os
+import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 
 log = fmf.utils.Logging('tmt').logger
 
@@ -38,6 +42,9 @@ DEFAULT_PLUGIN_ORDER_RECOMMENDS = 71
 
 # Config directory
 CONFIG_PATH = '~/.config/tmt'
+
+# Special process return code
+PROCESS_TIMEOUT = 124
 
 
 class Config(object):
@@ -128,6 +135,13 @@ class Common(object):
             return None
         return cls._context.params.get(option, default)
 
+    def _fmf_context(self):
+        """ Return the current fmf contex """
+        try:
+            return self._context.obj.fmf_context
+        except AttributeError:
+            return dict()
+
     def opt(self, option, default=None):
         """
         Get an option from the command line context
@@ -191,31 +205,42 @@ class Common(object):
         with open(os.path.join(self.workdir, 'log.txt'), 'a') as log:
             log.write(message + '\n')
 
-    def info(self, key, value=None, color=None, shift=0):
+    def info(self, key, value=None, color=None, shift=0, err=False):
         """ Show a message unless in quiet mode """
         self._log(self._indent(key, value, color=None, shift=shift))
         if not self.opt('quiet'):
-            echo(self._indent(key, value, color, shift))
+            echo(self._indent(key, value, color, shift), err=err)
 
-    def verbose(self, key, value=None, color=None, shift=0, level=1):
+    def warn(self, message, shift=0):
+        """ Show a yellow warning message on info level, send to stderr """
+        self.info('warn', message, color='yellow', shift=shift, err=True)
+
+    def fail(self, message, shift=0):
+        """ Show a red failure message on info level, send to stderr """
+        self.info('fail', message, color='red', shift=shift, err=True)
+
+    def verbose(
+        self, key, value=None, color=None, shift=0, level=1, err=False):
         """ Show message if in requested verbose mode level """
         self._log(self._indent(key, value, color=None, shift=shift))
         if self.opt('verbose') >= level:
-            echo(self._indent(key, value, color, shift))
+            echo(self._indent(key, value, color, shift), err=err)
 
-    def debug(self, key, value=None, color=None, shift=1, level=1):
+    def debug(self, key, value=None, color=None, shift=1, level=1, err=False):
         """ Show message if in requested debug mode level """
         self._log(self._indent(key, value, color=None, shift=shift))
         if self.opt('debug') >= level:
-            echo(self._indent(key, value, color, shift))
+            echo(self._indent(key, value, color, shift), err=err)
 
     def _run(
-        self, command, cwd, shell, env, log, join=False, interactive=False):
+        self, command, cwd, shell, env, log, join=False, interactive=False,
+        timeout=None):
         """
         Run command, capture the output
 
         By default stdout and stderr are captured separately.
         Use join=True to merge stderr into stdout.
+        Use timeout=<seconds> to finish process after given time
         """
         # By default command ouput is logged using debug
         if not log:
@@ -255,33 +280,55 @@ class Common(object):
         stdout = ''
         stderr = ''
 
-        # Capture the output
-        while process.poll() is None:
-            # Check which file descriptors are ready for read
-            selected = select.select(descriptors, [], [])
-            for descriptor in selected[0]:
-                # Handle stdout
-                if descriptor == process.stdout.fileno():
-                    line = process.stdout.readline().decode('utf-8')
-                    stdout += line
-                    if line != '':
-                        log('out', line.rstrip('\n'), 'yellow', level=3)
-                # Handle stderr
-                if not join and descriptor == process.stderr.fileno():
-                    line = process.stderr.readline().decode('utf-8')
-                    stderr += line
-                    if line != '':
-                        log('err', line.rstrip('\n'), 'yellow', level=3)
+        # Prepare kill function for the timer
+        def kill():
+            """ Kill the process and adjust the return code """
+            process.kill()
+            process.returncode = PROCESS_TIMEOUT
+
+        try:
+            # Start the timer
+            timer = Timer(timeout, kill)
+            timer.start()
+
+            # Capture the output
+            while process.poll() is None:
+                # Check which file descriptors are ready for read
+                selected = select.select(descriptors, [], [], timeout)
+
+                for descriptor in selected[0]:
+                    # Handle stdout
+                    if descriptor == process.stdout.fileno():
+                        line = process.stdout.readline().decode(
+                            'utf-8', errors='replace')
+                        stdout += line
+                        if line != '':
+                            log('out', line.rstrip('\n'), 'yellow', level=3)
+                    # Handle stderr
+                    if not join and descriptor == process.stderr.fileno():
+                        line = process.stderr.readline().decode(
+                            'utf-8', errors='replace')
+                        stderr += line
+                        if line != '':
+                            log('err', line.rstrip('\n'), 'yellow', level=3)
+
+        finally:
+            # Cancel the timer
+            timer.cancel()
 
         # Check for possible additional output
-        for line in process.stdout.readlines():
-            line = line.decode('utf-8')
-            stdout += line
-            log('out', line.rstrip('\n'), 'yellow', level=3)
-        for line in [] if join else process.stderr.readlines():
-            line = line.decode('utf-8')
-            stderr += line
-            log('err', line.rstrip('\n'), 'yellow', level=3)
+        selected = select.select(descriptors, [], [], timeout)
+        for descriptor in selected[0]:
+            if descriptor == process.stdout.fileno():
+                for line in process.stdout.readlines():
+                    line = line.decode('utf-8', errors='replace')
+                    stdout += line
+                    log('out', line.rstrip('\n'), 'yellow', level=3)
+            if not join and descriptor == process.stderr.fileno():
+                for line in process.stderr.readlines():
+                    line = line.decode('utf-8', errors='replace')
+                    stderr += line
+                    log('err', line.rstrip('\n'), 'yellow', level=3)
 
         # Handle the exit code, return output
         if process.returncode != 0:
@@ -294,8 +341,8 @@ class Common(object):
         return stdout if join else (stdout, stderr)
 
     def run(
-            self, command, message=None, cwd=None, dry=False,
-            shell=True, env=None, interactive=False, join=False, log=None):
+            self, command, message=None, cwd=None, dry=False, shell=True,
+            env=None, interactive=False, join=False, log=None, timeout=None):
         """
         Run command, give message, handle errors
 
@@ -322,7 +369,8 @@ class Common(object):
         # Run the command, handle the exit code
         cwd = cwd or self.workdir
         try:
-            return self._run(command, cwd, shell, env, log, join, interactive)
+            return self._run(
+                command, cwd, shell, env, log, join, interactive, timeout)
         except RunError as error:
             self.debug(error.message, level=3)
             raise RunError(
@@ -335,7 +383,7 @@ class Common(object):
             path = os.path.join(self.workdir, path)
         self.debug(f"Read file '{path}'.", level=level)
         try:
-            with open(path) as data:
+            with open(path, encoding='utf-8', errors='replace') as data:
                 return data.read()
         except OSError as error:
             raise FileError(f"Failed to read '{path}'.\n{error}")
@@ -349,7 +397,7 @@ class Common(object):
         if self.opt('dry'):
             return
         try:
-            with open(path, 'w') as target:
+            with open(path, 'w', encoding='utf-8', errors='replace') as target:
                 return target.write(data)
         except OSError as error:
             raise FileError(f"Failed to write '{path}'.\n{error}")
@@ -514,6 +562,46 @@ def listify(data, split=False, keys=None):
     return [data]
 
 
+# These two are helpers for shell_to_dict and environment_to_dict -
+# there is some overlap of their functionality.
+def _add_simple_var(result, var):
+    """
+    Add a single NAME=VALUE pair into result dictionary
+
+    Parse given string VAR to its constituents, NAME and VALUE, and add
+    them to the provided dict.
+    """
+
+    matched = re.match("([^=]+)=(.*)", var)
+    if not matched:
+        raise GeneralError(f"Invalid variable specification '{var}'.")
+    name, value = matched.groups()
+    result[name] = value
+
+
+def _add_file_vars(result, filepath):
+    """
+    Add variables loaded from file into the result dictionary
+
+    Load mapping from a YAML file 'filepath', and add its content -
+    "name: value" entries - to the provided dict.
+    """
+
+    if not filepath[1:]:
+        raise GeneralError(
+            f"Invalid variable file specification '{filepath}'.")
+
+    try:
+        with open(filepath[1:], 'r') as content:
+            file_vars = yaml_to_dict(content)
+    except Exception as exception:
+        raise GeneralError(
+            f"Failed to load variables from '{filepath}': {exception}")
+
+    for name, value in file_vars.items():
+        result[name] = str(value)
+
+
 def shell_to_dict(variables):
     """
     Convert shell-like variables into a dictionary
@@ -532,12 +620,64 @@ def shell_to_dict(variables):
         if variable is None:
             continue
         for var in shlex.split(variable):
-            matched = re.match("([^=]+)=(.*)", var)
-            if not matched:
-                raise GeneralError(f"Invalid variable specification '{var}'.")
-            name, value = matched.groups()
-            result[name] = value
+            _add_simple_var(result, var)
+
     return result
+
+
+def environment_to_dict(variables):
+    """
+    Convert environment variables into a dictionary
+
+    Variables may be specified in the following two ways:
+
+    * NAME=VALUE pairs
+    * @foo.yaml
+
+    If "variable" starts with "@" character, it is treated as a path to
+    a YAML file that contains "key: value" pairs which are then
+    transparently loaded and added to the final dictionary.
+
+    In general, allowed inputs are the same as in "shell_to_dict"
+    function, with the addition of "@foo.yaml" form:
+    'X=1'
+    'X=1 Y=2 Z=3'
+    ['X=1', 'Y=2', 'Z=3']
+    ['X=1 Y=2 Z=3', 'A=1 B=2 C=3']
+    'TXT="Some text with spaces in it"'
+    @foo.yaml
+    @../../bar.yaml
+    """
+
+    if not isinstance(variables, (list, tuple)):
+        variables = [variables]
+    result = dict()
+
+    for variable in variables:
+        if variable is None:
+            continue
+        for var in shlex.split(variable):
+            if var.startswith('@'):
+                _add_file_vars(result, var)
+            else:
+                _add_simple_var(result, var)
+
+    return result
+
+
+def context_to_dict(context):
+    """
+    Convert command line context definition into a dictionary
+
+    Does the same as environment_to_dict() plus separates possible
+    comma-separated values into lists. Here's a couple of examples:
+
+    distro=fedora-33 ---> {'distro': ['fedora']}
+    arch=x86_64,ppc64 ---> {'arch': ['x86_64', 'ppc64']}
+    """
+    return {
+        key: value.split(',')
+        for key, value in environment_to_dict(context).items()}
 
 
 def dict_to_yaml(data, width=None, sort=False):
@@ -592,6 +732,21 @@ def shell_variables(data):
 
     # Convert from dictionary
     return [f"{key}={shlex.quote(str(value))}" for key, value in data.items()]
+
+
+def duration_to_seconds(duration):
+    """ Convert sleep time format into seconds """
+    units = {
+        's': 1,
+        'm': 60,
+        'h': 60 * 60,
+        'd': 60 * 60 * 24,
+        }
+    try:
+        number, suffix = re.match(r'^(\d+)([smhd]?)$', str(duration)).groups()
+        return int(number) * units.get(suffix, 1)
+    except (ValueError, AttributeError):
+        raise SpecificationError(f"Invalid duration '{duration}'.")
 
 
 def verdict(decision, comment=None, good='pass', bad='fail', problem='warn'):
@@ -724,24 +879,49 @@ def public_git_url(url):
         return f'https://{host}/{project}'
 
     # RHEL packages
+    # old: git+ssh://psplicha@pkgs.devel.redhat.com/tests/bash
     # old: ssh://psplicha@pkgs.devel.redhat.com/tests/bash
     # old: ssh://pkgs.devel.redhat.com/tests/bash
     # new: git://pkgs.devel.redhat.com/tests/bash
-    matched = re.match(r'ssh://(\w+@)?(pkgs\.devel\.redhat\.com)/(.*)', url)
+    matched = re.match(
+        r'(git\+)?ssh://(\w+@)?(pkgs\.devel\.redhat\.com)/(.*)', url)
     if matched:
-        _, host, project = matched.groups()
+        _, _, host, project = matched.groups()
         return f'git://{host}/{project}'
 
     # Fedora packages, Pagure
+    # old: git+ssh://psss@pkgs.fedoraproject.org/tests/shell
     # old: ssh://psss@pkgs.fedoraproject.org/tests/shell
     # new: https://pkgs.fedoraproject.org/tests/shell
-    matched = re.match(r'ssh://(\w+@)?([^/]*)/(.*)', url)
+    matched = re.match(r'(git\+)?ssh://(\w+@)?([^/]*)/(.*)', url)
     if matched:
-        _, host, project = matched.groups()
+        _, _, host, project = matched.groups()
         return f'https://{host}/{project}'
 
     # Otherwise return unmodified
     return url
+
+
+def retry_session(retries=3, backoff_factor=0.1, method_whitelist=False,
+                  status_forcelist=(429, 500, 502, 503, 504)):
+    """
+    Create a requests.Session() that retries on request failure.
+
+    'method_whitelist' is set to False to retry on all http request methods
+    by default.
+    """
+    session = requests.Session()
+    retry = Retry(
+        total=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+        method_whitelist=method_whitelist,
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
 
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

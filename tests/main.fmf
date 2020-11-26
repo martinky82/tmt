@@ -1,5 +1,6 @@
 test: ./test.sh
+framework: beakerlib
 contact: Petr Šplíchal <psplicha@redhat.com>
 duration: 5m
 tier: 1
-tag: [container]
+tag: [container, virtual]

@@ -5,6 +5,11 @@ provision:
 execute:
     how: beakerlib.tmt
 
+/file:
+    summary: "Simple test for the file command"
+    discover+:
+        test: file
+
 /apache:
     summary: "Apache test (library requires another library)"
     discover+:
@@ -21,6 +26,10 @@ execute:
         summary: "Certificate test (fmf format)"
         discover+:
             test: fmf
+    /recommend:
+        summary: "Certificate test (recommended library)"
+        discover+:
+            test: recommend
     /nick:
         summary: "Certificate test (custom nick name)"
         discover+:
@@ -37,3 +46,20 @@ execute:
         summary: "Custom destination directory"
         discover+:
             test: destination
+    /missing:
+        /library:
+            summary: "Missing library"
+            discover+:
+                test: missing/library
+        /repository:
+            summary: "Missing repository"
+            discover+:
+                test: missing/repository
+        /metadata:
+            summary: "Missing metadata"
+            discover+:
+                test: missing/metadata
+        /reference:
+            summary: "Missing reference"
+            discover+:
+                test: missing/reference

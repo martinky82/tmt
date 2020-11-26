@@ -128,21 +128,30 @@ def implemented_tested_documented(function):
 @click.group(invoke_without_command=True, cls=CustomGroup)
 @click.pass_context
 @click.option(
-    '-r', '--root', metavar='PATH', default='.', show_default=True,
-    help='Path to the tree root.')
+    '-r', '--root', metavar='PATH', show_default=True,
+    help="Path to the tree root, '.' by default.")
+@click.option(
+    '-c', '--context', metavar='DATA', multiple='True',
+    help='Set the fmf context. Use KEY=VAL or KEY=VAL1,VAL2... format '
+         'to define individual dimensions or the @FILE notation to load data '
+         'from provided yaml file. Can be specified multiple times. ')
 @verbose_debug_quiet
-def main(context, root, **kwargs):
+def main(click_contex, root, context, **kwargs):
     """ Test Management Tool """
-    # Initialize metadata tree
-    tree = tmt.Tree(root)
-    tree._save_context(context)
-    context.obj = tmt.utils.Common()
-    context.obj.tree = tree
+    # Save click context and fmf context for future use
+    tmt.utils.Common._save_context(click_contex)
+    click_contex.obj = tmt.utils.Common()
+    click_contex.obj.fmf_context = tmt.utils.context_to_dict(context)
+
+    # Initialize metadata tree (from given path or current directory)
+    tree = tmt.Tree(root or os.curdir)
+    click_contex.obj.tree = tree
+
     # List of enabled steps
-    context.obj.steps = set()
+    click_contex.obj.steps = set()
 
     # Show overview of available tests, plans and stories
-    if context.invoked_subcommand is None:
+    if click_contex.invoked_subcommand is None:
         tmt.Test.overview(tree)
         tmt.Plan.overview(tree)
         tmt.Story.overview(tree)
@@ -179,8 +188,9 @@ def main(context, root, **kwargs):
     '-S', '--skip', type=click.Choice(tmt.steps.STEPS), metavar='STEP',
     help='Skip given step(s) during test run execution.', multiple=True)
 @click.option(
-    '-e', '--environment', metavar='KEY=VALUE', multiple='True',
-    help='Set environment variable. Can be specified multiple times.')
+    '-e', '--environment', metavar='KEY=VALUE|@FILE', multiple='True',
+    help='Set environment variable. Can be specified multiple times. '
+         'The "@" prefix marks a YAML file to load.')
 @verbose_debug_quiet
 @force_dry
 def run(context, id_, **kwargs):
@@ -246,10 +256,10 @@ def tests(context, **kwargs):
 
 @run.resultcallback()
 @click.pass_context
-def finito(context, commands, *args, **kwargs):
+def finito(click_context, commands, *args, **kwargs):
     """ Run tests if run defined """
-    if hasattr(context.obj, 'run'):
-        context.obj.run.go()
+    if hasattr(click_context.obj, 'run'):
+        click_context.obj.run.go()
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #  Test
@@ -316,9 +326,12 @@ def lint(context, **kwargs):
     Use '.' to select tests under the current working directory.
     """
     tmt.Test._save_context(context)
+    exit_code = 0
     for test in context.obj.tree.tests():
-        test.lint()
+        if not test.lint():
+            exit_code = 1
         echo()
+    raise SystemExit(exit_code)
 
 
 _test_templates = listed(tmt.templates.TEST, join='or')
@@ -352,9 +365,20 @@ def create(context, name, template, force, **kwargs):
 @click.option(
     '--disabled', default=False, is_flag=True,
     help='Import disabled test cases from Nitrate as well.')
+@click.option(
+    '--manual', default=False, is_flag=True,
+    help='Import manual test cases from Nitrate.')
+@click.option(
+    '--plan', metavar='PLAN',
+    help='Identifier of test plan from which to import manual test cases.')
+@click.option(
+    '--case', metavar='CASE',
+    help='Identifier of manual test case to be imported.')
 @verbose_debug_quiet
 @force_dry
-def import_(context, paths, makefile, nitrate, purpose, disabled, **kwargs):
+def import_(
+        context, paths, makefile, nitrate, purpose, disabled, manual, plan,
+        case, **kwargs):
     """
     Import old test metadata into the new fmf format.
 
@@ -369,6 +393,15 @@ def import_(context, paths, makefile, nitrate, purpose, disabled, **kwargs):
                    environment, relevancy, enabled
     """
     tmt.Test._save_context(context)
+
+    if manual:
+        if not (case or plan):
+            raise tmt.utils.GeneralError(
+                "Option --case or --plan is mandatory when using --manual.")
+        else:
+            tmt.convert.read_manual(plan, case, disabled)
+            return 0
+
     if not paths:
         paths = ['.']
     for path in paths:
@@ -383,7 +416,7 @@ def import_(context, paths, makefile, nitrate, purpose, disabled, **kwargs):
         # Add path to common metadata if there are virtual test cases
         if individual:
             root = fmf.Tree(path).root
-            common['path'] = os.path.join( '/', os.path.relpath(path, root))
+            common['path'] = os.path.join('/', os.path.relpath(path, root))
         # Store common metadata
         common_path = os.path.join(path, 'main.fmf')
         tmt.convert.write(common_path, common)
@@ -392,6 +425,8 @@ def import_(context, paths, makefile, nitrate, purpose, disabled, **kwargs):
             testcase_path = os.path.join(
                 path, str(testcase['extra-nitrate']) + '.fmf')
             tmt.convert.write(testcase_path, testcase)
+        # Adjust runtest.sh content and permission if needed
+        tmt.convert.adjust_runtest(os.path.join(path, 'runtest.sh'))
 
 
 @tests.command()
@@ -494,9 +529,12 @@ def lint(context, **kwargs):
     Use '.' to select plans under the current working directory.
     """
     tmt.Plan._save_context(context)
+    exit_code = 0
     for plan in context.obj.tree.plans():
-        plan.lint()
+        if not plan.lint():
+            exit_code = 1
         echo()
+    raise SystemExit(exit_code)
 
 
 _plan_templates = listed(tmt.templates.PLAN, join='or')

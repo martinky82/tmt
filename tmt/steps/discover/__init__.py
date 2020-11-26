@@ -3,7 +3,7 @@ import tmt
 from fmf.utils import listed
 
 class Discover(tmt.steps.Step):
-    """ Gather information about test cases to be executed """
+    """ Gather information about test cases to be executed. """
 
     def __init__(self, data, plan):
         """ Store supported attributes, check for sanity """
@@ -52,11 +52,15 @@ class Discover(tmt.steps.Step):
         if isinstance(scripts, str):
             scripts = [scripts]
 
+        # Check the execute step for possible custom duration limit
+        duration = self.plan.execute.data[0].get(
+            'duration', tmt.base.DEFAULT_TEST_DURATION_L2)
+
         # Prepare the list of tests
         tests = []
         for index, script in enumerate(scripts):
             name = f'script-{str(index).zfill(2)}'
-            tests.append(dict(name=name, test=script))
+            tests.append(dict(name=name, test=script, duration=duration))
 
         # Append new data if tests already defined
         if self.data[0].get('tests'):
@@ -111,6 +115,7 @@ class Discover(tmt.steps.Step):
         if self.status() == 'done':
             self.info('status', 'done', 'green', shift=1)
             self.summary()
+            self.try_running_login()
             return
 
         # Perform test discovery, gather discovered tests
@@ -127,6 +132,10 @@ class Discover(tmt.steps.Step):
             for test in plugin.tests():
                 test.name = f"{prefix}{test.name}"
                 test.path = f"/{plugin.name}{test.path}"
+                # Use the default test framework if not defined in L1
+                # FIXME remove when we drop the old execution methods
+                if not test.framework:
+                    test.framework = self.plan.execute._framework
                 # Update test environment with plan environment
                 test.environment.update(self.plan.environment)
                 self._tests.append(test)

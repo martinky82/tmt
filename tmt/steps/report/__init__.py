@@ -5,7 +5,7 @@ import click
 
 
 class Report(tmt.steps.Step):
-    """ Provide test results overview and send reports """
+    """ Provide test results overview and send reports. """
 
     # Default implementation for report is display
     how = 'display'
@@ -47,6 +47,7 @@ class Report(tmt.steps.Step):
         if self.status() == 'done':
             self.info('status', 'done', 'green', shift=1)
             self.summary()
+            self.try_running_login()
             return
 
         # Perform the reporting
@@ -61,6 +62,9 @@ class Report(tmt.steps.Step):
 
 class ReportPlugin(tmt.steps.Plugin):
     """ Common parent of report plugins """
+
+    # Default implementation for report is display
+    how = 'display'
 
     # List of all supported methods aggregated from all plugins
     _supported_methods = []

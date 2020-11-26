@@ -7,11 +7,17 @@
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 TEST = dict()
+TEST_METADATA = dict()
 
-TEST_METADATA = """
+TEST_METADATA['shell'] = """
 summary: Concise summary describing what the test does
-contact: Name Surname <email@example.com>
 test: ./test.sh
+""".lstrip()
+
+TEST_METADATA['beakerlib'] = """
+summary: Concise summary describing what the test does
+test: ./test.sh
+framework: beakerlib
 """.lstrip()
 
 TEST['shell'] = """
@@ -51,6 +57,14 @@ rlJournalEnd
 #  Plan Templates
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+DEFAULT_PLAN = """
+/plans/default:
+    discover:
+        how: fmf
+    execute:
+        how: tmt
+""".lstrip()
+
 PLAN = dict()
 
 PLAN['mini'] = """
@@ -66,7 +80,7 @@ summary:
 discover:
     how: fmf
 execute:
-    how: beakerlib
+    how: tmt
 """.lstrip()
 
 PLAN['full'] = """
@@ -79,7 +93,7 @@ prepare:
     how: ansible
     playbooks: plans/packages.yml
 execute:
-    how: beakerlib
+    how: tmt
 """.lstrip()
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -90,23 +104,23 @@ STORY = dict()
 
 STORY['mini'] = """
 story: As a user I want to do this and that.
-examples: One example is worth thousand words.
+example: One example is worth thousand words.
 """.lstrip()
 
 STORY['base'] = """
 summary:
-    Short description summarizing the story.
+    Short description summarizing the story
 story:
     As a user I want to do this and that
     so that I can achieve this.
-examples:
+example:
     - One example is worth thousand words.
     - Of course, there can be more than one.
 """.lstrip()
 
 STORY['full'] = """
 summary:
-    Short description summarizing the story.
+    Short description summarizing the story
 story:
     As a user I want to do this and that
     so that I can achieve this.
@@ -115,7 +129,7 @@ description:
     Usually spans across several paragraphs. It should not
     contain detailed examples. Those should be stored
     under the 'examples' attribute.
-examples:
+example:
     - One example is worth thousand words.
     - Of course, there can be more than one.
 """.lstrip()

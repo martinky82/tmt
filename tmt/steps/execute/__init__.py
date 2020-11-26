@@ -4,18 +4,41 @@ import fmf
 import tmt
 import click
 
-# Logs directory name
-LOGS = 'logs'
+# Test data directory name
+TEST_DATA = 'data'
+
+# Default test framework
+DEFAULT_FRAMEWORK = 'shell'
 
 
 class Execute(tmt.steps.Step):
-    """ Run tests using the specified framework """
+    """
+    Run tests using the specified executor.
+
+    Note that the old execution methods 'shell.tmt', 'beakerlib.tmt',
+    'shell.detach' and 'beakerlib.detach' have been deprecated and the
+    backward-compatible support for them will be dropped in March 2021.
+
+    Use the new L1 metadata attribute 'framework' instead to specify
+    which test framework should be used for execution. This allows to
+    combine tests using different test frameworks in a single plan.
+    """
+
+    # Internal executor is the default implementation
+    how = 'tmt'
 
     def __init__(self, data, plan):
         """ Initialize execute step data """
         super().__init__(data, plan)
         # List of Result() objects representing test results
         self._results = []
+
+        # Default test framework and mapping old methods
+        # FIXME remove when we drop the old execution methods
+        self._framework = DEFAULT_FRAMEWORK
+        # Map old methods now if there is no run (and thus no wake up)
+        if not self.plan.run:
+            self._map_old_methods()
 
     def load(self):
         """ Load test results """
@@ -34,6 +57,28 @@ class Execute(tmt.steps.Step):
             (result.name, result.export()) for result in self.results()])
         self.write('results.yaml', tmt.utils.dict_to_yaml(results))
 
+    def _map_old_methods(self):
+        """ Map the old execute methods in a backward-compatible way """
+        how = self.data[0]['how']
+        matched = re.search(r"^(shell|beakerlib)(\.(tmt|detach))?$", how)
+        if not matched:
+            return
+        # Show the old method deprecation warning to users
+        self.warn(f"The '{how}' execute method has been deprecated.")
+        # Map the old syntax to the appropriate executor
+        # shell, beakerlib ---> tmt
+        # shell.tmt, beakerlib.tmt ---> tmt
+        # shell.detach, beakerlib.detach ---> detach
+        how = matched.group(3) or 'tmt'
+        self.warn(f"Use 'how: {how}' in the execute step instead (L2).")
+        self.data[0]['how'] = how
+        # Store shell or beakerlib as the default test framework
+        # (used when the framework is not defined in the L1 metadata)
+        framework = matched.group(1)
+        self.warn(f"Set 'framework: {framework}' in test metadata (L1).")
+        self._framework = framework
+        self.warn("Support for old methods will be dropped in March 2021.")
+
     def wake(self):
         """ Wake up the step (process workdir and command line) """
         super().wake()
@@ -44,6 +89,7 @@ class Execute(tmt.steps.Step):
                 "Multiple execute steps defined in '{}'.".format(self.plan))
 
         # Choose the right plugin and wake it up
+        self._map_old_methods()
         executor = ExecutePlugin.delegate(self, self.data[0])
         executor.wake()
         self._plugins.append(executor)
@@ -74,6 +120,7 @@ class Execute(tmt.steps.Step):
         if self.status() == 'done':
             self.info('status', 'done', 'green', shift=1)
             self.summary()
+            self.try_running_login()
             return
 
         # Make sure that guests are prepared
@@ -119,6 +166,9 @@ class ExecutePlugin(tmt.steps.Plugin):
     # List of all supported methods aggregated from all plugins
     _supported_methods = []
 
+    # Internal executor is the default implementation
+    how = 'tmt'
+
     @classmethod
     def base_command(cls, method_class=None, usage=None):
         """ Create base click command (common for all execute plugins) """
@@ -139,17 +189,17 @@ class ExecutePlugin(tmt.steps.Plugin):
 
         return execute
 
-    def log(self, test, filename=None, full=False, create=False):
+    def data_path(self, test, filename=None, full=False, create=False):
         """
-        Prepare full/relative test log/directory path
+        Prepare full/relative test data directory/file path
 
-        Construct logs directory path for given test, create directory
+        Construct test data directory path for given test, create it
         if requested and return the full or relative path to it (if
-        filename not provided) or to the given log file otherwise.
+        filename not provided) or to the given data file otherwise.
         """
         # Prepare directory path, create if requested
         directory = os.path.join(
-            self.step.workdir, LOGS, test.name.lstrip('/'))
+            self.step.workdir, TEST_DATA, test.name.lstrip('/'))
         if create and not os.path.isdir(directory):
             os.makedirs(directory)
         if not filename:
@@ -157,15 +207,34 @@ class ExecutePlugin(tmt.steps.Plugin):
         path = os.path.join(directory, filename)
         return path if full else os.path.relpath(path, self.step.workdir)
 
+    def prepare_tests(self):
+        """
+        Prepare discovered tests for testing
+
+        Check which tests have been discovered, for each test prepare
+        the aggregated metadata in a 'metadata.yaml' file under the test
+        data directory and finally return a list of discovered tests.
+        """
+        tests = self.step.plan.discover.tests()
+        for test in tests:
+            metadata_filename = self.data_path(
+                test, filename='metadata.yaml', full=True, create=True)
+            self.write(
+                metadata_filename, tmt.utils.dict_to_yaml(test._metadata))
+        return tests
+
     def check_shell(self, test):
         """ Check result of a shell test """
         # Prepare the log path
-        data = {'log': self.log(test, 'out.log')}
+        data = {'log': self.data_path(test, 'out.log')}
         # Process the exit code
         try:
             data['result'] = {0: 'pass', 1: 'fail'}[test.returncode]
         except KeyError:
             data['result'] = 'error'
+            # Add note about the exceeded duration
+            if test.returncode == tmt.utils.PROCESS_TIMEOUT:
+                data['note'] = 'timeout'
         return tmt.Result(data, test.name)
 
     def check_beakerlib(self, test):
@@ -173,11 +242,12 @@ class ExecutePlugin(tmt.steps.Plugin):
         # Initialize data, prepare log paths
         data = {'result': 'error', 'log': []}
         for log in ['out.log', 'journal.txt']:
-            if os.path.isfile(self.log(test, log, full=True)):
-                data['log'].append(self.log(test, log))
+            if os.path.isfile(self.data_path(test, log, full=True)):
+                data['log'].append(self.data_path(test, log))
         # Check beakerlib log for the result
         try:
-            beakerlib_results_file = self.log(test, 'TestResults', full=True)
+            beakerlib_results_file = self.data_path(
+                test, 'TestResults', full=True)
             results = self.read(beakerlib_results_file, level=3)
         except tmt.utils.FileError:
             self.debug(f"Unable to read '{beakerlib_results_file}'.", level=3)

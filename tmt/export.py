@@ -26,9 +26,11 @@ def import_nitrate():
     # traceback when nitrate not installed or config file not available.
     # And we want to keep the core tmt package with minimal dependencies.
     try:
-        global nitrate, DEFAULT_PRODUCT
+        global nitrate, DEFAULT_PRODUCT, gssapi
         import nitrate
+        import gssapi
         DEFAULT_PRODUCT = nitrate.Product(name='RHEL Tests')
+        return nitrate
     except ImportError:
         raise ConvertError("Install nitrate to export tests there.")
     except nitrate.NitrateError as error:
@@ -44,6 +46,7 @@ def export_to_nitrate(test, create, general):
     try:
         nitrate_id = test.node.get('extra-nitrate')[3:]
         nitrate_case = nitrate.TestCase(int(nitrate_id))
+        nitrate_case.summary # Make sure we connect to the server now
         echo(style(f"Test case '{nitrate_case.identifier}' found.", fg='blue'))
     except TypeError:
         # Create a new nitrate test case
@@ -52,9 +55,12 @@ def export_to_nitrate(test, create, general):
             new_test_created = True
         else:
             raise ConvertError("Nitrate test case id not found.")
+    except (nitrate.NitrateError, gssapi.raw.misc.GSSError) as error:
+        raise ConvertError(error)
 
     # Summary
-    summary = test.node.get('extra-summary', test.summary)
+    summary = test.node.get(
+        'extra-summary', test.node.get('extra-task', test.summary))
     if summary:
         nitrate_case.summary = summary
         echo(style('summary: ', fg='green') + summary)
@@ -112,6 +118,10 @@ def export_to_nitrate(test, create, general):
     nitrate_case.time = test.duration
     echo(style('estimated time: ', fg='green') + test.duration)
 
+    # Manual
+    nitrate_case.automated = not test.manual
+    echo(style('automated: ', fg='green') + ['auto', 'manual'][test.manual])
+
     # Status
     current_status = nitrate_case.status
     # Enable enabled tests
@@ -160,9 +170,9 @@ def export_to_nitrate(test, create, general):
             echo(style(section + ': ', fg='green') + attribute.strip())
 
     # fmf identifer
-    fmf_id = test.fmf_id
-    struct_field.set('fmf', yaml.dump(fmf_id))
-    echo(style('fmf id:\n', fg='green') + yaml.dump(fmf_id).strip())
+    fmf_id = tmt.utils.dict_to_yaml(test.fmf_id)
+    struct_field.set('fmf', fmf_id)
+    echo(style('fmf id:\n', fg='green') + fmf_id.strip())
 
     # Warning
     if WARNING not in struct_field.header():

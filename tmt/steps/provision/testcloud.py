@@ -7,7 +7,7 @@ import tmt
 import click
 import requests
 
-from tmt.utils import ProvisionError, WORKDIR_ROOT
+from tmt.utils import ProvisionError, WORKDIR_ROOT, retry_session
 
 def import_testcloud():
     """
@@ -248,7 +248,7 @@ class GuestTestcloud(tmt.Guest):
         """ Get url, retry when fails, return response """
         for i in range(1, DEFAULT_CONNECT_TIMEOUT):
             try:
-                response = requests.get(url)
+                response = retry_session().get(url)
                 if response.ok:
                     return response
             except requests.RequestException:
@@ -391,6 +391,10 @@ class GuestTestcloud(tmt.Guest):
             self.image.prepare()
         except FileNotFoundError:
             raise ProvisionError(f"Image '{self.image.local_path}' not found.")
+        except testcloud.exceptions.TestcloudPermissionsError:
+            raise ProvisionError(
+                f"Failed to prepare the image. "
+                f"Check the '{TESTCLOUD_IMAGES}' directory permissions.")
 
         # Create instance
         self.instance_name = self._random_name()

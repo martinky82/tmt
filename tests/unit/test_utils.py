@@ -2,10 +2,11 @@
 
 import re
 import tmt
+import pytest
 import unittest
 
 from tmt.utils import StructuredField, StructuredFieldError, public_git_url
-from tmt.utils import listify
+from tmt.utils import listify, duration_to_seconds
 
 def test_public_git_url():
     """ Verify url conversion """
@@ -17,8 +18,14 @@ def test_public_git_url():
             'original': 'ssh://psplicha@pkgs.devel.redhat.com/tests/bash',
             'expected': 'git://pkgs.devel.redhat.com/tests/bash',
         }, {
+            'original': 'git+ssh://psplicha@pkgs.devel.redhat.com/tests/bash',
+            'expected': 'git://pkgs.devel.redhat.com/tests/bash',
+        }, {
             'original': 'ssh://pkgs.devel.redhat.com/tests/bash',
             'expected': 'git://pkgs.devel.redhat.com/tests/bash',
+        }, {
+            'original': 'git+ssh://psss@pkgs.fedoraproject.org/tests/shell',
+            'expected': 'https://pkgs.fedoraproject.org/tests/shell',
         }, {
             'original': 'ssh://psss@pkgs.fedoraproject.org/tests/shell',
             'expected': 'https://pkgs.fedoraproject.org/tests/shell',
@@ -47,6 +54,18 @@ def test_config():
     config1.last_run(run)
     config2 = tmt.utils.Config()
     assert config2.last_run() == run
+
+
+def test_duration_to_seconds():
+    """ Check conversion from sleep time format to seconds """
+    assert duration_to_seconds(5) == 5
+    assert duration_to_seconds('5') == 5
+    assert duration_to_seconds('5s') == 5
+    assert duration_to_seconds('5m') == 300
+    assert duration_to_seconds('5h') == 18000
+    assert duration_to_seconds('5d') == 432000
+    with pytest.raises(tmt.utils.SpecificationError):
+        duration_to_seconds('bad')
 
 
 class test_structured_field(unittest.TestCase):

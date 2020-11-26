@@ -3,17 +3,55 @@
 ======================
 
 
-Fedora 30
+Virtualization Tips
 ------------------------------------------------------------------
 
-If you want to run tests in virtual machine on Fedora 30 do not
-install ``tmt-all`` package. Install base ``tmt`` package instead
-and use the following commands to install necessary dependencies::
+Here's just a couple of hints how to get the virtualization
+quickly working on your laptop. See the `Getting started with
+virtualization`__ docs to learn more.
 
-    dnf install -y vagrant libvirt rsync --setopt=install_weak_deps=False
-    dnf install -y rubygem-{formatador,excon,builder,ruby-libvirt,nokogiri,multi_json}
+Make sure the ``libvirtd`` is running on your box::
 
-Then everything should work fine.
+    sudo systemctl start libvirtd
+
+Add your user account to the libvirt group::
+
+    sudo usermod -a -G libvirt $USER
+
+Note that you might need to restart your desktop session to get it
+fully working. Or at least start a new login shell::
+
+    su - $USER
+
+In some cases you might also need to activate the default network
+device::
+
+    sudo virsh net-start default
+
+Here you can find vm `images for download`__.
+
+__ https://docs.fedoraproject.org/en-US/quick-docs/getting-started-with-virtualization/
+__ https://kojipkgs.fedoraproject.org/compose/
+
+
+Package Cache
+------------------------------------------------------------------
+
+Using containers can speed up your testing. However, fetching
+package cache can slow things down substantially. Use this set of
+commands to prepare a container image with a fresh dnf cache::
+
+    podman run -itd --name fresh fedora
+    podman exec fresh dnf makecache
+    podman image rm fedora:fresh
+    podman commit fresh fedora:fresh
+    podman container rm -f fresh
+
+Then specify the newly created image in the provision step::
+
+    tmt run --all provision --how container --image fedora:fresh
+
+In this way you can save up to several minutes for each plan.
 
 
 vagrant-rsync-back

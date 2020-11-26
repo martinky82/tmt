@@ -67,6 +67,9 @@ class DiscoverShell(tmt.steps.discover.DiscoverPlugin):
                 data['path'] = f"/tests{data['path']}"
             except KeyError:
                 data['path'] = f"/tests"
+            # Apply default test duration unless provided
+            if not 'duration' in data:
+                data['duration'] = tmt.base.DEFAULT_TEST_DURATION_L2
 
             # Create a simple fmf node, adjust its name
             tests.child(name, data)
@@ -77,7 +80,7 @@ class DiscoverShell(tmt.steps.discover.DiscoverPlugin):
         if directory:
             self.info('directory', directory, 'green')
             self.debug("Copy '{}' to '{}'.".format(directory, testdir))
-            shutil.copytree(directory, testdir)
+            shutil.copytree(directory, testdir, symlinks=True)
         else:
             os.makedirs(testdir)
 

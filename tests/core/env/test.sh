@@ -34,6 +34,20 @@ rlJournalStart
                 done
             done
         rlPhaseEnd
+
+        # Use the same setup as the test above, but instead of defining
+        # variables on the command line read them from a YAML file
+        rlPhaseStartTest "Variable in YAML file ($execute)"
+            for plan in yes no; do
+                for test in yes no; do
+                    rlRun "tmt run -avvv -e @vars.yaml \
+                        execute --how $execute \
+                        plan --name $plan \
+                        test --name $test | tee output"
+                    rlAssertGrep '>>>O0<<<' 'output'
+                done
+            done
+        rlPhaseEnd
     done
 
     rlPhaseStartCleanup

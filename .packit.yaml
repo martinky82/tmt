@@ -5,12 +5,12 @@ synced_files:
 upstream_project_name: tmt
 downstream_package_name: tmt
 
-current_version_command: ["make", "packit-version"]
 
 actions:
   create-archive:
-  - make packit-tarball
-  - make packit-path
+  - make tarball
+  get-current-version:
+  - make version
 
 jobs:
 - job: tests
@@ -19,3 +19,21 @@ jobs:
     targets:
     - fedora-all
     - epel-8
+- job: copr_build
+  trigger: pull_request
+  metadata:
+    targets:
+    - fedora-all
+    - epel-8
+
+- job: copr_build
+  trigger: commit
+  metadata:
+    branch: master
+    targets:
+    - fedora-all
+    - epel-8
+    list_on_homepage: True
+    preserve_project: True
+    owner: psss
+    project: tmt
